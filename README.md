@@ -8,12 +8,9 @@ The released code follows the paper-facing route and does not include the qualit
 
 ```text
 RelativeFlow/
-├─ train_ct.py
-├─ train_mr.py
-├─ predict_ct.py
-├─ predict_mr.py
-├─ evaluate_ct.py
-├─ evaluate_mr.py
+├─ train.py
+├─ predict.py
+├─ evaluate.py
 ├─ models/
 │  ├─ unet.py
 │  ├─ nn.py
@@ -53,8 +50,8 @@ Default settings are aligned with the paper-oriented release:
 - checkpoints are saved to `weights/ct` and `weights/mr`
 
 ```bash
-python train_ct.py --train-file <paired_path_CT_train.txt>
-python train_mr.py --train-file <paired_path_MR_train.txt>
+python train.py --modality ct --train-file <paired_path_CT_train.txt>
+python train.py --modality mr --train-file <paired_path_MR_train.txt>
 ```
 
 ## Prediction
@@ -66,15 +63,15 @@ Default iterative sampling uses:
 - output directories: `outputs/ct/testA` and `outputs/mr/testA`
 
 ```bash
-python predict_ct.py --test-file <paired_path_CT_testA.txt> --ckpt <checkpoint>
-python predict_mr.py --test-file <paired_path_MR_testA.txt> --ckpt <checkpoint>
+python predict.py --modality ct --test-file <paired_path_CT_testA.txt> --ckpt <checkpoint>
+python predict.py --modality mr --test-file <paired_path_MR_testA.txt> --ckpt <checkpoint>
 ```
 
 ## Evaluation
 
 ```bash
-python evaluate_ct.py --test-file <paired_path_CT_testA.txt> --predictions-dir <dir>
-python evaluate_mr.py --test-file <paired_path_MR_testA.txt> --predictions-dir <dir>
+python evaluate.py --modality ct --test-file <paired_path_CT_testA.txt> --predictions-dir <dir>
+python evaluate.py --modality mr --test-file <paired_path_MR_testA.txt> --predictions-dir <dir>
 ```
 
 If `--predictions-dir` is omitted, the scripts use the default prediction output directory.

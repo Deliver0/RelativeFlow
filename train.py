@@ -5,15 +5,20 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
-import schedulefree
 import torch
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from models import UNetModel
-from utils import DegradationSimulatorMR, MRDataset
+from utils.data import CTDataset, MRDataset
+
+try:
+    import schedulefree
+except ImportError:
+    schedulefree = None
 
 
 @dataclass
@@ -42,27 +47,48 @@ class AdaptiveDeltaRange:
             self.patience_counter = self.patience_limit
 
 
-def parse_args() -> argparse.Namespace:
+MODALITY_DEFAULTS = {
+    "ct": {
+        "batch_size": 5,
+        "output_dir": "weights/ct",
+        "delta_max": 1.1,
+        "checkpoint_prefix": "ct",
+        "logger_name": "train_ct",
+        "dataset_cls": CTDataset,
+    },
+    "mr": {
+        "batch_size": 20,
+        "output_dir": "weights/mr",
+        "delta_max": 1.0,
+        "checkpoint_prefix": "mr",
+        "logger_name": "train_mr",
+        "dataset_cls": MRDataset,
+    },
+}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--modality", choices=["ct", "mr"], required=True)
     parser.add_argument("--train-file", type=str, required=True)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--image-size", type=int, default=512)
-    parser.add_argument("--batch-size", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--loss", choices=["l1", "l2"], default="l2")
     parser.add_argument("--resume", type=str, default="")
-    parser.add_argument("--output-dir", type=str, default="weights/mr")
+    parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--delta-min-init", type=float, default=0.1)
     parser.add_argument("--delta-min-floor", type=float, default=0.02)
-    parser.add_argument("--delta-max", type=float, default=1.0)
+    parser.add_argument("--delta-max", type=float, default=None)
     parser.add_argument("--delta-min-step", type=float, default=0.005)
     parser.add_argument("--delta-patience", type=int, default=2)
     parser.add_argument("--target-clamp", type=float, default=10.0)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def build_logger(workspace: Path, log_dir: str, name: str) -> logging.Logger:
@@ -96,41 +122,77 @@ def compute_loss(prediction: torch.Tensor, target: torch.Tensor, loss_name: str)
     return F.l1_loss(prediction, target)
 
 
-def main() -> None:
-    args = parse_args()
+def create_dataset(modality: str, train_file: str, image_size: int) -> Dataset:
+    dataset_cls: Callable[[str, int], Dataset] = MODALITY_DEFAULTS[modality]["dataset_cls"]
+    return dataset_cls(train_file, image_size)
+
+
+def create_simulator(modality: str, device: torch.device):
+    from utils.simulation import DegradationSimulatorCT, DegradationSimulatorMR
+
+    if modality == "ct":
+        return DegradationSimulatorCT(device=device)
+    return DegradationSimulatorMR(device=device)
+
+
+def degrade_batch(simulator, modality: str, gt_images: torch.Tensor, min_delta: float, max_delta: float, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    if modality == "ct":
+        delta_t = torch.rand((gt_images.shape[0], 1, 1, 1), device=device) * (max_delta - min_delta) + min_delta
+        input_images = simulator.degrade(gt_images, delta_t, ct_unit="unit")
+        return input_images, delta_t
+    delta_scalar = torch.rand(1, device=device) * (max_delta - min_delta) + min_delta
+    delta_t = delta_scalar.expand(gt_images.shape[0], 1, 1, 1)
+    input_images = simulator.degrade(gt_images, float(delta_scalar.item()))
+    return input_images, delta_t
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    defaults = MODALITY_DEFAULTS[args.modality]
+    batch_size = args.batch_size if args.batch_size is not None else defaults["batch_size"]
+    output_dir_name = args.output_dir if args.output_dir is not None else defaults["output_dir"]
+    delta_max = args.delta_max if args.delta_max is not None else defaults["delta_max"]
+    logger_name = defaults["logger_name"]
+    checkpoint_prefix = defaults["checkpoint_prefix"]
+
     workspace = Path(__file__).resolve().parent
-    logger = build_logger(workspace, args.log_dir, "train_mr")
+    logger = build_logger(workspace, args.log_dir, logger_name)
     device = torch.device(args.device)
-    dataset = MRDataset(args.train_file, args.image_size)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers, pin_memory=True)
+    dataset = create_dataset(args.modality, args.train_file, args.image_size)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers, pin_memory=True)
     model = load_model(args.image_size, device, args.resume)
-    simulator = DegradationSimulatorMR(device=device)
-    optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=args.lr)
-    optimizer.train()
+    simulator = create_simulator(args.modality, device)
+    if schedulefree is not None:
+        optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=args.lr)
+        optimizer.train()
+        logger.info("optimizer=AdamWScheduleFree")
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        logger.warning("schedulefree is unavailable; falling back to torch.optim.AdamW")
     delta_range = AdaptiveDeltaRange(
         current_min=args.delta_min_init,
         floor=args.delta_min_floor,
-        delta_max=args.delta_max,
+        delta_max=delta_max,
         step=args.delta_min_step,
         patience_limit=args.delta_patience,
     )
-    output_dir = workspace / args.output_dir
+    output_dir = workspace / output_dir_name
     output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("modality=%s", args.modality)
     logger.info("train_file=%s", args.train_file)
     logger.info("dataset_size=%d", len(dataset))
+    logger.info("batch_size=%d", batch_size)
     logger.info("loss=%s", args.loss)
     logger.info("device=%s", device)
     for epoch in range(args.epochs):
         model.train()
         running_loss = 0.0
         min_delta, max_delta = delta_range.current()
-        progress = tqdm(dataloader, dynamic_ncols=True, desc=f"train_mr epoch {epoch}")
+        progress = tqdm(dataloader, dynamic_ncols=True, desc=f"train_{args.modality} epoch {epoch}")
         for gt_images in progress:
             gt_images = gt_images.to(device)
             optimizer.zero_grad()
-            delta_scalar = torch.rand(1, device=device) * (max_delta - min_delta) + min_delta
-            delta_t = delta_scalar.expand(gt_images.shape[0], 1, 1, 1)
-            input_images = simulator.degrade(gt_images, float(delta_scalar.item()))
+            input_images, delta_t = degrade_batch(simulator, args.modality, gt_images, min_delta, max_delta, device)
             diff = gt_images - input_images
             denominator = torch.clamp(torch.exp(delta_t) - 1.0, min=1e-8)
             target_u = torch.clamp(diff / denominator, min=-args.target_clamp, max=args.target_clamp)
@@ -147,7 +209,7 @@ def main() -> None:
             progress.set_postfix(loss=f"{running_loss / max(1, progress.n):.4f}", delta_min=f"{min_delta:.3f}")
         epoch_loss = running_loss / max(1, len(dataloader))
         delta_range.update(epoch_loss, logger)
-        checkpoint_path = output_dir / f"mr_epoch_{epoch + 1:03d}.pt"
+        checkpoint_path = output_dir / f"{checkpoint_prefix}_epoch_{epoch + 1:03d}.pt"
         torch.save({"model_state_dict": model.state_dict(), "epoch": epoch + 1, "loss": epoch_loss}, checkpoint_path)
         logger.info("epoch=%d loss=%.6f delta_range=[%.4f, %.4f]", epoch + 1, epoch_loss, min_delta, max_delta)
         logger.info("saved=%s", checkpoint_path)

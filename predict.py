@@ -10,22 +10,41 @@ import torch
 from tqdm import tqdm
 
 from models import UNetModel
-from utils.data import build_output_path, load_ct_dicom, read_paired_paths, save_ct_dicom
+from utils.data import build_output_path, load_ct_dicom, load_mr_nifti, read_paired_paths, save_ct_dicom, save_mr_nifti
 
 
-def parse_args() -> argparse.Namespace:
+MODALITY_DEFAULTS = {
+    "ct": {
+        "batch_size": 8,
+        "results_dir": "outputs/ct/testA",
+        "logger_name": "predict_ct",
+        "load_fn": load_ct_dicom,
+        "save_fn": save_ct_dicom,
+    },
+    "mr": {
+        "batch_size": 4,
+        "results_dir": "outputs/mr/testA",
+        "logger_name": "predict_mr",
+        "load_fn": load_mr_nifti,
+        "save_fn": save_mr_nifti,
+    },
+}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--modality", choices=["ct", "mr"], required=True)
     parser.add_argument("--test-file", type=str, required=True)
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--image-size", type=int, default=512)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--delta-seq", type=str, default="0.2,0.1,0.05")
     parser.add_argument("--update-factor", choices=["one_minus_exp_neg", "expm1", "identity"], default="expm1")
-    parser.add_argument("--results-dir", type=str, default="outputs/ct/testA")
+    parser.add_argument("--results-dir", type=str, default=None)
     parser.add_argument("--root-path", type=str, default="")
     parser.add_argument("--log-dir", type=str, default="logs")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def build_logger(workspace: Path, log_dir: str, name: str) -> logging.Logger:
@@ -76,26 +95,34 @@ def run_batch(model: UNetModel, batch_input: torch.Tensor, delta_seq: list[float
         return torch.clamp(current_x, 0.0, 1.0)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    defaults = MODALITY_DEFAULTS[args.modality]
+    batch_size = args.batch_size if args.batch_size is not None else defaults["batch_size"]
+    results_dir_name = args.results_dir if args.results_dir is not None else defaults["results_dir"]
+    logger_name = defaults["logger_name"]
+    load_fn = defaults["load_fn"]
+    save_fn = defaults["save_fn"]
+
     workspace = Path(__file__).resolve().parent
-    logger = build_logger(workspace, args.log_dir, "predict_ct")
+    logger = build_logger(workspace, args.log_dir, logger_name)
     device = torch.device(args.device)
     delta_seq = parse_sequence(args.delta_seq)
     model = load_model(args.image_size, args.ckpt, device)
     pairs = read_paired_paths(args.test_file)
+    logger.info("modality=%s", args.modality)
     logger.info("test_pairs=%d", len(pairs))
     logger.info("delta_seq=%s", delta_seq)
-    results_dir = workspace / args.results_dir
-    for start in tqdm(range(0, len(pairs), args.batch_size), desc="predict_ct", dynamic_ncols=True):
-        batch_pairs = pairs[start:start + args.batch_size]
+    results_dir = workspace / results_dir_name
+    for start in tqdm(range(0, len(pairs), batch_size), desc=f"predict_{args.modality}", dynamic_ncols=True):
+        batch_pairs = pairs[start:start + batch_size]
         batch_input_paths = [pair[0] for pair in batch_pairs]
-        batch_images = [load_ct_dicom(path, args.image_size) for path in batch_input_paths]
+        batch_images = [load_fn(path, args.image_size) for path in batch_input_paths]
         batch_tensor = torch.from_numpy(np.stack(batch_images, axis=0))
         batch_output = run_batch(model, batch_tensor, delta_seq, args.update_factor, device)
         for index, input_path in enumerate(batch_input_paths):
             output_path = build_output_path(input_path, args.root_path, results_dir)
-            save_ct_dicom(batch_output[index:index + 1], input_path, output_path)
+            save_fn(batch_output[index:index + 1], input_path, output_path)
     logger.info("results_dir=%s", results_dir)
 
 

@@ -9,19 +9,35 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from utils import MetricComputer
-from utils.data import build_output_path, load_mr_nifti, read_paired_paths
+from utils.data import build_output_path, load_ct_dicom, load_mr_nifti, read_paired_paths
 
 
-def parse_args() -> argparse.Namespace:
+MODALITY_DEFAULTS = {
+    "ct": {
+        "predictions_dir": "outputs/ct/testA",
+        "logger_name": "evaluate_ct",
+        "load_fn": load_ct_dicom,
+        "metric_mode": "CT",
+    },
+    "mr": {
+        "predictions_dir": "outputs/mr/testA",
+        "logger_name": "evaluate_mr",
+        "load_fn": load_mr_nifti,
+        "metric_mode": "MR",
+    },
+}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--modality", choices=["ct", "mr"], required=True)
     parser.add_argument("--test-file", type=str, required=True)
-    parser.add_argument("--predictions-dir", type=str, default="outputs/mr/testA")
+    parser.add_argument("--predictions-dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--root-path", type=str, default="")
     parser.add_argument("--log-dir", type=str, default="logs")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def build_logger(workspace: Path, log_dir: str, name: str) -> logging.Logger:
@@ -39,28 +55,36 @@ def build_logger(workspace: Path, log_dir: str, name: str) -> logging.Logger:
     return logger
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    from utils.metrics import MetricComputer
+
+    defaults = MODALITY_DEFAULTS[args.modality]
+    predictions_dir_name = args.predictions_dir if args.predictions_dir is not None else defaults["predictions_dir"]
+    logger_name = defaults["logger_name"]
+    load_fn = defaults["load_fn"]
+    metric_mode = defaults["metric_mode"]
+
     workspace = Path(__file__).resolve().parent
-    logger = build_logger(workspace, args.log_dir, "evaluate_mr")
+    logger = build_logger(workspace, args.log_dir, logger_name)
     device = torch.device(args.device)
     metric = MetricComputer(device=args.device)
     pairs = read_paired_paths(args.test_file)
-    predictions_dir = workspace / args.predictions_dir
-    csv_path = workspace / args.log_dir / f"evaluate_mr_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    predictions_dir = workspace / predictions_dir_name
+    csv_path = workspace / args.log_dir / f"{logger_name}_{datetime.now():%Y%m%d_%H%M%S}.csv"
     totals = {"psnr": 0.0, "ssim": 0.0, "rmse": 0.0, "lpips": 0.0}
     count = 0
     with open(csv_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["input_path", "target_path", "prediction_path", "psnr", "ssim", "rmse", "lpips"])
-        for input_path, target_path in tqdm(pairs, desc="evaluate_mr", dynamic_ncols=True):
+        for input_path, target_path in tqdm(pairs, desc=f"evaluate_{args.modality}", dynamic_ncols=True):
             prediction_path = build_output_path(input_path, args.root_path, predictions_dir)
             if not prediction_path.exists():
                 logger.warning("missing prediction: %s", prediction_path)
                 continue
-            prediction = torch.from_numpy(load_mr_nifti(prediction_path, args.image_size)).unsqueeze(0).to(device)
-            target = torch.from_numpy(load_mr_nifti(target_path, args.image_size)).unsqueeze(0).to(device)
-            psnr, ssim, rmse, lpips = metric.compute_all(prediction, target, mode="MR")
+            prediction = torch.from_numpy(load_fn(prediction_path, args.image_size)).unsqueeze(0).to(device)
+            target = torch.from_numpy(load_fn(target_path, args.image_size)).unsqueeze(0).to(device)
+            psnr, ssim, rmse, lpips = metric.compute_all(prediction, target, mode=metric_mode)
             writer.writerow([input_path, target_path, str(prediction_path), psnr, ssim, rmse, lpips])
             totals["psnr"] += psnr
             totals["ssim"] += ssim
