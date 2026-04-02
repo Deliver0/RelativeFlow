@@ -1,11 +1,13 @@
 __all__ = [
-    "CTDataset",
-    "MRDataset",
+    "GenericImageDataset",
     "batch_stack",
     "build_output_path",
+    "load_image",
     "load_ct_dicom",
     "load_mr_nifti",
+    "read_path_list",
     "read_paired_paths",
+    "save_image",
     "save_ct_dicom",
     "save_mr_nifti",
     "DegradationSimulatorCT",
@@ -15,7 +17,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"CTDataset", "MRDataset", "batch_stack", "build_output_path", "load_ct_dicom", "load_mr_nifti", "read_paired_paths", "save_ct_dicom", "save_mr_nifti"}:
+    if name in {"GenericImageDataset", "batch_stack", "build_output_path", "load_image", "load_ct_dicom", "load_mr_nifti", "read_path_list", "read_paired_paths", "save_image", "save_ct_dicom", "save_mr_nifti"}:
         from . import data
 
         return getattr(data, name)

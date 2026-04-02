@@ -15,6 +15,21 @@ def read_paired_paths(file_path: str | Path) -> List[Tuple[str, str]]:
     return [(str(a), str(b)) for a, b in pairs]
 
 
+def read_path_list(file_path: str | Path) -> List[str]:
+    paths: List[str] = []
+    with open(file_path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "," in stripped:
+                _, target_path = stripped.split(",", 1)
+                paths.append(str(target_path))
+            else:
+                paths.append(str(stripped))
+    return paths
+
+
 def _downsample_2d(image: np.ndarray, image_size: int) -> np.ndarray:
     h, w = image.shape
     step_h = max(1, h // image_size)
@@ -94,30 +109,36 @@ def save_mr_nifti(tensor: torch.Tensor, reference_path: str | Path, output_path:
     nib.save(nib.Nifti1Image(image, affine), str(output_path))
 
 
-class CTDataset(Dataset):
-    def __init__(self, train_file: str | Path, image_size: int):
-        self.pairs = read_paired_paths(train_file)
+def load_image(path: str | Path, image_size: int, io_format: str) -> np.ndarray:
+    if io_format == "dicom":
+        return load_ct_dicom(path, image_size)
+    if io_format == "nifti":
+        return load_mr_nifti(path, image_size)
+    raise ValueError(f"Unsupported io_format: {io_format}")
+
+
+def save_image(tensor: torch.Tensor, reference_path: str | Path, output_path: str | Path, io_format: str) -> None:
+    if io_format == "dicom":
+        save_ct_dicom(tensor, reference_path, output_path)
+        return
+    if io_format == "nifti":
+        save_mr_nifti(tensor, reference_path, output_path)
+        return
+    raise ValueError(f"Unsupported io_format: {io_format}")
+
+
+class GenericImageDataset(Dataset):
+    def __init__(self, train_file: str | Path, image_size: int, io_format: str):
+        self.paths = read_path_list(train_file)
         self.image_size = image_size
+        self.io_format = io_format
 
     def __len__(self) -> int:
-        return len(self.pairs)
+        return len(self.paths)
 
     def __getitem__(self, index: int) -> torch.Tensor:
-        _, target_path = self.pairs[index]
-        return torch.from_numpy(load_ct_dicom(target_path, self.image_size))
-
-
-class MRDataset(Dataset):
-    def __init__(self, train_file: str | Path, image_size: int):
-        self.pairs = read_paired_paths(train_file)
-        self.image_size = image_size
-
-    def __len__(self) -> int:
-        return len(self.pairs)
-
-    def __getitem__(self, index: int) -> torch.Tensor:
-        _, target_path = self.pairs[index]
-        return torch.from_numpy(load_mr_nifti(target_path, self.image_size))
+        target_path = self.paths[index]
+        return torch.from_numpy(load_image(target_path, self.image_size, self.io_format))
 
 
 def build_output_path(input_path: str, root_path: str | Path, output_dir: str | Path) -> Path:

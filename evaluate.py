@@ -9,20 +9,18 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from utils.data import build_output_path, load_ct_dicom, load_mr_nifti, read_paired_paths
+from utils.data import build_output_path, load_image, read_paired_paths
 
 
 MODALITY_DEFAULTS = {
     "ct": {
         "predictions_dir": "outputs/ct/testA",
         "logger_name": "evaluate_ct",
-        "load_fn": load_ct_dicom,
         "metric_mode": "CT",
     },
     "mr": {
         "predictions_dir": "outputs/mr/testA",
         "logger_name": "evaluate_mr",
-        "load_fn": load_mr_nifti,
         "metric_mode": "MR",
     },
 }
@@ -33,6 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--modality", choices=["ct", "mr"], required=True)
     parser.add_argument("--test-file", type=str, required=True)
     parser.add_argument("--predictions-dir", type=str, default=None)
+    parser.add_argument("--io-format", choices=["dicom", "nifti"], required=True)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--root-path", type=str, default="")
@@ -62,7 +61,6 @@ def main(argv: list[str] | None = None) -> None:
     defaults = MODALITY_DEFAULTS[args.modality]
     predictions_dir_name = args.predictions_dir if args.predictions_dir is not None else defaults["predictions_dir"]
     logger_name = defaults["logger_name"]
-    load_fn = defaults["load_fn"]
     metric_mode = defaults["metric_mode"]
 
     workspace = Path(__file__).resolve().parent
@@ -70,6 +68,8 @@ def main(argv: list[str] | None = None) -> None:
     device = torch.device(args.device)
     metric = MetricComputer(device=args.device)
     pairs = read_paired_paths(args.test_file)
+    logger.info("modality=%s", args.modality)
+    logger.info("io_format=%s", args.io_format)
     predictions_dir = workspace / predictions_dir_name
     csv_path = workspace / args.log_dir / f"{logger_name}_{datetime.now():%Y%m%d_%H%M%S}.csv"
     totals = {"psnr": 0.0, "ssim": 0.0, "rmse": 0.0, "lpips": 0.0}
@@ -82,8 +82,8 @@ def main(argv: list[str] | None = None) -> None:
             if not prediction_path.exists():
                 logger.warning("missing prediction: %s", prediction_path)
                 continue
-            prediction = torch.from_numpy(load_fn(prediction_path, args.image_size)).unsqueeze(0).to(device)
-            target = torch.from_numpy(load_fn(target_path, args.image_size)).unsqueeze(0).to(device)
+            prediction = torch.from_numpy(load_image(prediction_path, args.image_size, args.io_format)).unsqueeze(0).to(device)
+            target = torch.from_numpy(load_image(target_path, args.image_size, args.io_format)).unsqueeze(0).to(device)
             psnr, ssim, rmse, lpips = metric.compute_all(prediction, target, mode=metric_mode)
             writer.writerow([input_path, target_path, str(prediction_path), psnr, ssim, rmse, lpips])
             totals["psnr"] += psnr
