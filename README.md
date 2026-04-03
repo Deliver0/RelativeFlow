@@ -1,8 +1,52 @@
 # RelativeFlow
 
-This repository contains the normalized open-source implementation of the RelativeFlow v2 route for CT and MR restoration.
+RelativeFlow is the normalized open-source release of the paper-facing v2 route for CT and MR image restoration.
 
-The released code follows the paper-facing route and does not include the quality encoder branch.
+This repository focuses on the core RelativeFlow pipeline described in the paper: simulation-based degradation, SVF supervision, and iterative restoration. The current release keeps the project structure compact and does not include the quality encoder branch.
+
+## Highlights
+
+- Unified `train.py`, `predict.py`, and `evaluate.py` entry points for CT and MR.
+- Paper-aligned training and sampling defaults for the released implementation.
+- Online degradation from clean or high-quality targets during training.
+- Explicit `--io-format` control for image reading and writing instead of binding file format to modality.
+- Simplified repository layout for easier open-source use and maintenance.
+
+## Quick Start
+
+### Install
+
+```bash
+pip install -r requirements.txt
+```
+
+### Run inference
+
+```bash
+python predict.py --modality ct --io-format dicom --test-file <paired_path_CT_testA.txt> --ckpt <checkpoint>
+python predict.py --modality mr --io-format nifti --test-file <paired_path_MR_testA.txt> --ckpt <checkpoint>
+```
+
+### Evaluate predictions
+
+```bash
+python evaluate.py --modality ct --io-format dicom --test-file <paired_path_CT_testA.txt> --predictions-dir <dir>
+python evaluate.py --modality mr --io-format nifti --test-file <paired_path_MR_testA.txt> --predictions-dir <dir>
+```
+
+### Train a model
+
+```bash
+python train.py --modality ct --io-format dicom --train-file <ct_target_list.txt>
+python train.py --modality mr --io-format nifti --train-file <mr_target_list.txt>
+```
+
+## Repository Scope
+
+- This release follows the paper-facing RelativeFlow v2 route.
+- The quality encoder branch is intentionally excluded from this repository.
+- `modality` controls the restoration setting and degradation simulator.
+- `io-format` controls how images are loaded and saved.
 
 ## Repository Structure
 
@@ -24,65 +68,60 @@ RelativeFlow/
 └─ .gitignore
 ```
 
-## Install
+## Data Lists
 
-```bash
-pip install -r requirements.txt
-```
-
-## Data List Format
-
-Training uses a text file in which each line contains either:
+Training reads only the clean or high-quality target path for each sample. Each line in the training list can be either:
 
 ```text
 target_path
 ```
 
-or the legacy compatible form:
+or the legacy-compatible form:
 
 ```text
 input_path,target_path
 ```
 
-Prediction and evaluation use a text file in which each line contains:
+Prediction and evaluation use paired lists in the form:
 
 ```text
 input_path,target_path
 ```
 
-For training, only the clean or high-quality target path is used for loading. The degraded input is generated online during training.
+During training, the degraded input is generated online from the target image rather than loaded from disk.
 
-## Training
+## Paper-Aligned Defaults
 
-Default settings are aligned with the paper-oriented release:
+- Loss: `L2`
+- Epochs: `30`
+- Initial `Δt_min = 0.2`
+- Initial `Δt_max = 0.2`
+- Decay factor `α = 0.9` with epoch-wise delta-range update
+- Velocity denominator: `exp(delta_t) - 1`
+- Sampling steps: `0.2,0.1,0.05`
+- Sampling update: `x = x + delta_t * u`
 
-- `L2` loss
-- `30` epochs
-- initial `Δt_min = 0.2`
-- initial `Δt_max = 0.2`
-- `α = 0.9` with epoch-wise update of the training delta range
-- CT and MR velocity denominator both use `exp(delta_t) - 1`
-- checkpoints are saved to `weights/ct` and `weights/mr`
+## Detailed Commands
+
+### Training
 
 ```bash
 python train.py --modality ct --io-format dicom --train-file <ct_target_list.txt>
 python train.py --modality mr --io-format nifti --train-file <mr_target_list.txt>
 ```
 
-## Prediction
+Checkpoints are saved by default to `weights/ct` and `weights/mr`.
 
-Default iterative sampling uses:
-
-- delta sequence: `0.2,0.1,0.05`
-- update rule: `x = x + delta_t * u`
-- output directories: `outputs/ct/testA` and `outputs/mr/testA`
+### Prediction
 
 ```bash
 python predict.py --modality ct --io-format dicom --test-file <paired_path_CT_testA.txt> --ckpt <checkpoint>
 python predict.py --modality mr --io-format nifti --test-file <paired_path_MR_testA.txt> --ckpt <checkpoint>
 ```
 
-## Evaluation
+Prediction outputs are written by default to `outputs/ct/testA` and `outputs/mr/testA`.
+
+### Evaluation
 
 ```bash
 python evaluate.py --modality ct --io-format dicom --test-file <paired_path_CT_testA.txt> --predictions-dir <dir>
@@ -90,11 +129,6 @@ python evaluate.py --modality mr --io-format nifti --test-file <paired_path_MR_t
 ```
 
 If `--predictions-dir` is omitted, the scripts use the default prediction output directory.
-
-## Notes
-
-- Image I/O format is selected explicitly through `--io-format` rather than being inferred from modality.
-- The repository is organized as root-level entry scripts plus `models/` and `utils/`, following a standard GitHub project layout.
 
 ## License
 
